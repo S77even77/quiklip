@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="Clip long videos into short ones, right in your browser. Nothing is uploaded.">
+<title>quiklip — clip video in your browser</title>
+<link rel="icon" href="/icon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+</head>
+<body>
+
+<!-- ══════════════════════════════════ LIBRARY ══════════════════════════════ -->
+<section class="screen" id="screen-library" data-screen="library">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> quiklip</div>
+    <button class="icon-btn" id="btn-refresh" aria-label="Refresh library">⟳</button>
+  </header>
+
+  <div class="scroll">
+    <div class="lead">
+      <h1>Your videos</h1>
+      <p>Pick a long video, mark the good bits as you watch, export them as separate clips.</p>
+    </div>
+
+    <div class="privacy">
+      <span class="pv-ico">🔒</span>
+      <div><b>Nothing is uploaded.</b> Your video is opened straight from your device and cut
+      here in the browser. There is no server, no account, and no file ever leaves your phone.</div>
+    </div>
+
+    <button class="add-card wide" id="btn-add-file">
+      <span class="add-ico">＋</span>
+      <span class="add-t">Choose a video</span>
+      <span class="add-s">From your phone, tablet or computer</span>
+    </button>
+    <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv" hidden>
+
+    <div id="engine-box" class="engine-box" hidden>
+      <div class="us-row"><span id="engine-label">Getting the video engine…</span><span id="engine-pct">0%</span></div>
+      <div class="bar"><i id="engine-bar"></i></div>
+      <div class="engine-note">One-time ~31 MB download. Your browser caches it for next time.</div>
+    </div>
+
+    <h2 class="section-title">Library <span class="count" id="lib-count"></span></h2>
+    <div id="library-list" class="list">
+      <div class="skeleton"></div>
+    </div>
+
+    <p class="footnote" id="compat-note"></p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════ CLIP ════════════════════════════════ -->
+<section class="screen" id="screen-clip" data-screen="clip" hidden>
+  <header class="topbar">
+    <button class="icon-btn" id="btn-back-lib" aria-label="Back to library">‹</button>
+    <div class="title-wrap">
+      <div class="title" id="clip-title">—</div>
+      <div class="subtitle" id="clip-sub"></div>
+    </div>
+    <button class="icon-btn" id="btn-settings" aria-label="Clipping settings">⚙</button>
+  </header>
+
+  <div class="player-wrap">
+    <video id="video" playsinline webkit-playsinline preload="metadata" disablepictureinpicture></video>
+    <div class="tap-layer" id="tap-layer">
+      <div class="big-play" id="big-play">▶</div>
+    </div>
+    <div class="armed-badge" id="armed-badge" hidden>
+      <span class="rec"></span> REC <b id="armed-dur">0.0s</b>
+    </div>
+  </div>
+
+  <div class="timeline" id="timeline">
+    <div class="tl-track" id="tl-track">
+      <div class="tl-clips" id="tl-clips"></div>
+      <div class="tl-armed" id="tl-armed" hidden></div>
+      <div class="tl-played" id="tl-played"></div>
+      <div class="tl-head" id="tl-head"></div>
+    </div>
+    <div class="tl-times">
+      <span id="t-cur">0:00</span>
+      <span id="t-rem" class="muted">-0:00</span>
+      <span id="t-dur">0:00</span>
+    </div>
+  </div>
+
+  <div class="transport">
+    <button class="tbtn" data-seek="-30"><sub>«</sub>30</button>
+    <button class="tbtn" data-seek="-5"><sub>«</sub>5</button>
+    <button class="tbtn play" id="btn-play">▶</button>
+    <button class="tbtn" data-seek="5">5<sub>»</sub></button>
+    <button class="tbtn" data-seek="30">30<sub>»</sub></button>
+  </div>
+
+  <div class="speed-row" id="speed-row">
+    <button data-rate="1" class="on">1×</button>
+    <button data-rate="1.5">1.5×</button>
+    <button data-rate="2">2×</button>
+    <button data-rate="3">3×</button>
+    <button data-rate="4">4×</button>
+  </div>
+
+  <div class="mark-zone">
+    <button class="mark-btn" id="btn-mark">
+      <span class="mk-ico" id="mk-ico">●</span>
+      <span class="mk-txt" id="mk-txt">START CLIP</span>
+      <span class="mk-hint" id="mk-hint">tap when the good part begins</span>
+    </button>
+    <button class="cancel-mark" id="btn-cancel-mark" hidden>✕ discard</button>
+  </div>
+
+  <div class="clips-panel">
+    <div class="cp-head">
+      <h2>Clips <span class="count" id="clip-count">0</span></h2>
+      <div class="legend">
+        <span><i class="k-open"></i>open</span>
+        <span><i class="k-closed"></i>closed</span>
+      </div>
+      <button class="primary sm" id="btn-goto-export" disabled>Export →</button>
+    </div>
+    <div id="clip-list" class="clip-list">
+      <p class="empty">No clips yet. Play the video and tap <b>START CLIP</b> when something good begins, then tap again to end it. The video never pauses.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════ EXPORT ═══════════════════════════════ -->
+<section class="screen" id="screen-export" data-screen="export" hidden>
+  <header class="topbar">
+    <button class="icon-btn" id="btn-back-clip" aria-label="Back to clipping">‹</button>
+    <div class="title-wrap"><div class="title">Export</div><div class="subtitle" id="exp-sub"></div></div>
+    <span style="width:44px"></span>
+  </header>
+
+  <div class="scroll">
+    <div id="export-setup">
+      <h3 class="opt-label">Shape</h3>
+      <div class="chips" id="opt-aspect">
+        <button data-v="original" class="on">Original</button>
+        <button data-v="9:16">9:16 <em>Reels</em></button>
+        <button data-v="1:1">1:1</button>
+        <button data-v="4:5">4:5</button>
+        <button data-v="16:9">16:9</button>
+      </div>
+
+      <div id="focus-wrap" hidden>
+        <h3 class="opt-label">Keep which side of frame</h3>
+        <div class="chips" id="opt-focus">
+          <button data-v="left">Left</button>
+          <button data-v="center" class="on">Center</button>
+          <button data-v="right">Right</button>
+        </div>
+      </div>
+
+      <h3 class="opt-label">Quality</h3>
+      <div class="chips col" id="opt-quality">
+        <button data-v="standard" class="on"><b>Standard</b><em>Exact cuts · reasonable speed</em></button>
+        <button data-v="high"><b>High</b><em>Better quality · noticeably slower</em></button>
+        <button data-v="copy"><b>Lightning</b><em>No re-encode · seconds, not minutes · cuts snap to keyframes (±2s), ignores shape</em></button>
+      </div>
+
+      <h3 class="opt-label">Resolution</h3>
+      <div class="chips" id="opt-cap">
+        <button data-v="480">480p</button>
+        <button data-v="720" class="on">720p</button>
+        <button data-v="1080">1080p</button>
+        <button data-v="0">Original</button>
+      </div>
+
+      <div class="summary" id="export-summary"></div>
+      <div class="warn" id="export-warn" hidden></div>
+      <button class="primary big" id="btn-run-export">Export <span id="exp-n">0</span> clips</button>
+    </div>
+
+    <div id="export-progress" hidden>
+      <div class="overall"><div class="bar big"><i id="ov-bar"></i></div><div class="ov-txt" id="ov-txt">Starting…</div></div>
+      <div id="job-list" class="job-list"></div>
+      <button class="ghost big" id="btn-cancel-export">Stop</button>
+      <div id="job-done" hidden>
+        <button class="primary big" id="btn-zip">⤓ Download all as .zip</button>
+        <button class="ghost big" id="btn-view-exports">See all clips</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═════════════════════════════════ EXPORTS ═══════════════════════════════ -->
+<section class="screen" id="screen-exports" data-screen="exports" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> Clips</div>
+    <span style="width:44px"></span>
+  </header>
+  <div class="scroll">
+    <div class="lead"><h1>Finished clips</h1><p>Tap to play, or use Save to keep a clip on your device.</p></div>
+    <div id="exports-list" class="list"><p class="empty">No clips exported yet.</p></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════ NAV ══════════════════════════════════ -->
+<nav class="tabbar" id="tabbar">
+  <button data-go="library" class="on"><span>▤</span>Library</button>
+  <button data-go="clip"><span>✂</span>Clip</button>
+  <button data-go="exports"><span>⤓</span>Clips</button>
+</nav>
+
+<!-- ═════════════════════════════════ SHEETS ════════════════════════════════ -->
+<div class="sheet-scrim" id="scrim" hidden></div>
+
+<div class="sheet" id="sheet-settings" hidden>
+  <div class="sh-grab"></div>
+  <h2>Clipping settings</h2>
+  <label class="row-set">
+    <div><b>Reaction offset</b><em>You always tap a moment late. Marks shift back by this much.</em></div>
+    <div class="stepper"><button data-off="-0.1">−</button><span id="off-val">0.5s</span><button data-off="0.1">+</button></div>
+  </label>
+  <label class="row-set">
+    <div><b>Tail padding</b><em>Extra seconds kept after you end a clip.</em></div>
+    <div class="stepper"><button data-tail="-0.1">−</button><span id="tail-val">0.3s</span><button data-tail="0.1">+</button></div>
+  </label>
+  <label class="row-set">
+    <div><b>Keep screen awake</b><em>Stops your phone locking mid-session.</em></div>
+    <input type="checkbox" id="opt-wake" class="switch" checked>
+  </label>
+  <button class="ghost big" id="sheet-close">Done</button>
+</div>
+
+<div class="sheet" id="sheet-clip" hidden>
+  <div class="sh-grab"></div>
+  <h2>Edit clip</h2>
+  <input type="text" id="ec-name" placeholder="Clip name" autocapitalize="words">
+  <div class="nudge-block">
+    <div class="nb-label">Start <b id="ec-start">0:00.0</b></div>
+    <div class="nudge"><button data-nudge="start,-1">−1s</button><button data-nudge="start,-0.1">−0.1</button><button data-nudge="start,0.1">+0.1</button><button data-nudge="start,1">+1s</button></div>
+  </div>
+  <div class="nudge-block">
+    <div class="nb-label">End <b id="ec-end">0:00.0</b></div>
+    <div class="nudge"><button data-nudge="end,-1">−1s</button><button data-nudge="end,-0.1">−0.1</button><button data-nudge="end,0.1">+0.1</button><button data-nudge="end,1">+1s</button></div>
+  </div>
+  <div class="ec-dur">Length <b id="ec-dur">0.0s</b></div>
+  <button class="ghost big" id="ec-preview">▶ Preview this clip</button>
+  <button class="primary big" id="ec-done">Save</button>
+  <button class="danger big" id="ec-delete">Delete clip</button>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

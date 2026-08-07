@@ -1,0 +1,13 @@
+{
+  "name": "quiklip",
+  "short_name": "quiklip",
+  "description": "Clip long-form video from your phone.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

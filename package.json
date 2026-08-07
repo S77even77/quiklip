@@ -1,0 +1,29 @@
+{
+  "name": "quiklip",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Clip long-form video into short clips, entirely in the browser. No upload, no server, no account.",
+  "scripts": {
+    "prepare-core": "node scripts/prepare-core.mjs",
+    "predev": "npm run prepare-core",
+    "dev": "vite",
+    "prebuild": "npm run prepare-core",
+    "build": "vite build",
+    "preview": "vite preview",
+    "verify": "node scripts/verify.mjs"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "0.12.10",
+    "@ffmpeg/core-mt": "0.12.10",
+    "@ffmpeg/ffmpeg": "0.12.15",
+    "@ffmpeg/util": "0.12.2"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "vite": "^8.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

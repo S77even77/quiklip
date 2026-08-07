@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vercel/
+
+# ffmpeg.wasm cores are copied out of node_modules by scripts/prepare-core.mjs
+# at build time — ~62 MB of binary that does not belong in git.
+public/ffmpeg/
+
+# local-server era working dirs (see legacy-local-server/)
+media/
+exports/
+projects/
+.cache/
+.trash/
+
+.DS_Store
+*.log
