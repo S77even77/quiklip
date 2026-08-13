@@ -6,7 +6,7 @@ uploaded, there is no server, no database, no account, and no API key.
 Open the video from your device, watch it, tap a big button when a good bit
 starts and again when it ends, and export every clip at the end.
 
-**Live:** _(add your Vercel URL here after deploying)_
+**Live:** https://quiklip.vercel.app
 
 ---
 
