@@ -66,6 +66,7 @@ function toast(msg, good) {
 
 function go(name) {
   if (name === 'clip' && !S.rec) { toast('Pick a video first'); name = 'library'; }
+  if (S.screen === 'record' && name !== 'record') teardownCamera();
   S.screen = name;
   $$('.screen').forEach((el) => (el.hidden = el.dataset.screen !== name));
   const tab = name === 'export' ? 'clip' : name;
@@ -77,6 +78,7 @@ function go(name) {
 $$('#tabbar button').forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
 $('#btn-back-lib').addEventListener('click', () => go('library'));
 $('#btn-back-clip').addEventListener('click', () => go('clip'));
+$('#btn-back-record').addEventListener('click', () => go('library'));
 
 /* ─────────────────────────────────────────────────────────── library */
 
@@ -224,6 +226,231 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   const f = e.dataTransfer?.files?.[0];
   if (f && f.type.startsWith('video')) addFile(f);
+});
+
+/* ─────────────────────────────────────────────────────────── camera / record */
+// Recording is ephemeral, per-session state — deliberately kept out of S so a
+// half-finished recording never gets treated as app state to persist/restore.
+const CAM = {
+  stream: null, recorder: null, chunks: [], mimeType: '', ext: '.webm',
+  startedAt: 0, pausedAccum: 0, pauseStartedAt: 0, timerId: null,
+  facing: 'environment', micMuted: false, blob: null, multiCam: false,
+};
+
+const canRecord = () => !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+
+/** First mimeType the browser can both record AND that ffmpeg.wasm can decode. */
+function pickRecorderMime() {
+  const candidates = [
+    'video/mp4;codecs=avc1,mp4a.40.2',   // Safari 16.4+
+    'video/mp4',
+    'video/webm;codecs=vp9,opus',        // Chrome/Edge/Firefox
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ];
+  return candidates.find((m) => window.MediaRecorder?.isTypeSupported?.(m)) || '';
+}
+
+$('#btn-add-record').addEventListener('click', () => {
+  if (!canRecord()) return toast('Camera recording needs a supported browser (Chrome, Safari 16.4+) over HTTPS');
+  go('record');
+  startCamera();
+});
+$('#btn-cam-retry').addEventListener('click', startCamera);
+
+async function startCamera() {
+  $('#cam-error').hidden = true;
+  $('#cam-review').hidden = true;
+  $('#cam-controls-live').hidden = false;
+  $('#rec-status-sub').textContent = 'Starting camera…';
+  stopCameraStream();
+
+  // Try progressively looser constraints — a resolution or facingMode the
+  // device can't honor should degrade gracefully, not dead-end the feature.
+  const attempts = [
+    { video: { facingMode: { ideal: CAM.facing }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: { echoCancellation: true, noiseSuppression: true } },
+    { video: { facingMode: { ideal: CAM.facing } }, audio: true },
+    { video: true, audio: true },
+  ];
+
+  let stream = null;
+  let lastErr = null;
+  for (const constraints of attempts) {
+    try { stream = await navigator.mediaDevices.getUserMedia(constraints); break; }
+    catch (e) { lastErr = e; }
+  }
+  if (!stream) return showCamError(lastErr);
+
+  CAM.stream = stream;
+  const v = $('#cam-preview');
+  v.srcObject = stream;
+  v.classList.toggle('mirror', CAM.facing === 'user');
+  if (CAM.micMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
+  $('#rec-status-sub').textContent = 'Ready';
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    CAM.multiCam = devices.filter((d) => d.kind === 'videoinput').length > 1;
+  } catch { CAM.multiCam = false; }
+  $('#btn-flip-camera').hidden = !CAM.multiCam;
+}
+
+function showCamError(err) {
+  const map = {
+    NotAllowedError: 'Camera access was denied. Allow camera & microphone access for this site in your browser settings, then try again.',
+    PermissionDeniedError: 'Camera access was denied. Allow camera & microphone access for this site, then try again.',
+    NotFoundError: 'No camera was found on this device.',
+    DevicesNotFoundError: 'No camera was found on this device.',
+    NotReadableError: 'Your camera is already in use by another app.',
+    TrackStartError: 'Your camera is already in use by another app.',
+    OverconstrainedError: 'This camera does not support the requested settings.',
+  };
+  $('#cam-error-msg').textContent = map[err?.name] || err?.message || 'Could not access the camera.';
+  $('#cam-error').hidden = false;
+  $('#cam-controls-live').hidden = true;
+  $('#rec-status-sub').textContent = 'Camera unavailable';
+}
+
+function stopCameraStream() {
+  CAM.stream?.getTracks().forEach((t) => t.stop());
+  CAM.stream = null;
+  const v = $('#cam-preview');
+  if (v) v.srcObject = null;
+}
+
+/** Full teardown when leaving the record screen by any route (tab, back, etc). */
+function teardownCamera() {
+  clearInterval(CAM.timerId);
+  if (CAM.recorder && CAM.recorder.state !== 'inactive') {
+    CAM.recorder.onstop = null; // leaving — don't pop the review sheet
+    try { CAM.recorder.stop(); } catch {}
+  }
+  stopCameraStream();
+  const pv = $('#cam-playback');
+  if (pv?.src) URL.revokeObjectURL(pv.src);
+  if (pv) { pv.removeAttribute('src'); pv.hidden = true; }
+  CAM.blob = null;
+}
+
+$('#btn-flip-camera').addEventListener('click', () => {
+  if (CAM.recorder && CAM.recorder.state !== 'inactive') return; // no flip mid-recording
+  CAM.facing = CAM.facing === 'user' ? 'environment' : 'user';
+  startCamera();
+});
+
+$('#btn-mute-mic').addEventListener('click', () => {
+  CAM.micMuted = !CAM.micMuted;
+  CAM.stream?.getAudioTracks().forEach((t) => (t.enabled = !CAM.micMuted));
+  $('#btn-mute-mic').classList.toggle('off', CAM.micMuted);
+  $('#btn-mute-mic').textContent = CAM.micMuted ? '🔇' : '🎙️';
+});
+
+$('#btn-record-toggle').addEventListener('click', () => {
+  if (!CAM.stream) return;
+  if (!CAM.recorder || CAM.recorder.state === 'inactive') startRecording();
+  else stopRecording();
+});
+
+$('#btn-pause-rec').addEventListener('click', () => {
+  if (!CAM.recorder) return;
+  if (CAM.recorder.state === 'recording') {
+    CAM.recorder.pause();
+    CAM.pauseStartedAt = performance.now();
+    $('#btn-pause-rec').textContent = '▶';
+    $('#cam-timer').classList.add('paused');
+  } else if (CAM.recorder.state === 'paused') {
+    CAM.recorder.resume();
+    CAM.pausedAccum += performance.now() - CAM.pauseStartedAt;
+    $('#btn-pause-rec').textContent = '❚❚';
+    $('#cam-timer').classList.remove('paused');
+  }
+});
+
+function startRecording() {
+  const mime = pickRecorderMime();
+  if (!mime) { toast('This browser cannot record video'); return; }
+  CAM.mimeType = mime;
+  CAM.ext = mime.includes('mp4') ? '.mp4' : '.webm';
+  CAM.chunks = [];
+  CAM.pausedAccum = 0;
+
+  let recorder;
+  try { recorder = new MediaRecorder(CAM.stream, { mimeType: mime }); }
+  catch { recorder = new MediaRecorder(CAM.stream); } // let the browser pick
+  CAM.recorder = recorder;
+
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
+  recorder.onstop = () => {
+    clearInterval(CAM.timerId);
+    const blob = new Blob(CAM.chunks, { type: CAM.mimeType || 'video/webm' });
+    CAM.blob = blob;
+    stopCameraStream();
+    showReview(blob);
+  };
+  // 1s timeslice bounds memory use on long recordings and means a crash loses
+  // at most the last second, not the whole take.
+  recorder.start(1000);
+  CAM.startedAt = performance.now();
+
+  $('#btn-record-toggle').classList.add('on');
+  $('#btn-pause-rec').hidden = false;
+  $('#btn-pause-rec').textContent = '❚❚';
+  $('#btn-flip-camera').hidden = true;
+  $('#cam-timer').hidden = false;
+  $('#cam-timer').classList.remove('paused');
+  $('#rec-status-sub').textContent = 'Recording…';
+  buzz(20);
+
+  CAM.timerId = setInterval(() => {
+    const elapsed = (performance.now() - CAM.startedAt - CAM.pausedAccum) / 1000;
+    $('#cam-timer-txt').textContent = fmt(Math.max(0, elapsed));
+  }, 250);
+}
+
+function stopRecording() {
+  if (!CAM.recorder || CAM.recorder.state === 'inactive') return;
+  CAM.recorder.stop();
+  $('#btn-record-toggle').classList.remove('on');
+  $('#btn-pause-rec').hidden = true;
+  $('#cam-timer').hidden = true;
+  $('#cam-controls-live').hidden = true;
+  buzz([15, 40, 15]);
+}
+
+function showReview(blob) {
+  const url = URL.createObjectURL(blob);
+  const pv = $('#cam-playback');
+  pv.src = url;
+  pv.hidden = false;
+  pv.onloadedmetadata = () => { $('#cam-review-dur').textContent = fmt(pv.duration); };
+  pv.play().catch(() => {});
+  $('#cam-review').hidden = false;
+  $('#rec-status-sub').textContent = 'Review your recording';
+}
+
+$('#btn-retake').addEventListener('click', () => {
+  const pv = $('#cam-playback');
+  if (pv.src) URL.revokeObjectURL(pv.src);
+  pv.removeAttribute('src');
+  pv.hidden = true;
+  CAM.blob = null;
+  $('#cam-review').hidden = true;
+  $('#cam-controls-live').hidden = false;
+  startCamera();
+});
+
+$('#btn-use-recording').addEventListener('click', async () => {
+  if (!CAM.blob) return;
+  const stamp = new Date();
+  const name = `recording-${stamp.toISOString().slice(0, 19).replace(/[:T]/g, '-')}${CAM.ext}`;
+  const file = new File([CAM.blob], name, { type: CAM.mimeType || 'video/webm', lastModified: stamp.getTime() });
+  const pv = $('#cam-playback');
+  if (pv.src) URL.revokeObjectURL(pv.src);
+  pv.removeAttribute('src');
+  pv.hidden = true;
+  CAM.blob = null;
+  await addFile(file); // reuses the exact same pipeline as an uploaded file
 });
 
 /* ─────────────────────────────────────────────────────────── open video */
@@ -840,6 +1067,7 @@ function compatNote() {
   if (typeof WebAssembly === 'undefined') bits.push('This browser has no WebAssembly — exporting will not work.');
   else if (!isIsolated()) bits.push('Running in compatibility mode — exports work but are slower.');
   else bits.push('Fast mode enabled.');
+  if (!canRecord()) bits.push('Camera recording needs HTTPS and a supported browser.');
   el.innerHTML = `${bits.join(' ')} Works best in Chrome, Edge, or Safari 16.4+.`;
 }
 
@@ -847,6 +1075,7 @@ setArmedUI(false);
 refreshSettings();
 loadLibrary();
 compatNote();
+if (!canRecord()) $('#btn-add-record').hidden = true;
 
 // Test seam for scripts/verify.mjs — lets the harness set exact in/out points
 // (bypassing the reaction offset) so exports can be checked against known times.

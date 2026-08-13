@@ -87,7 +87,11 @@ export function buildArgs({ inputPath, outPath, start, end, settings, info }) {
     // "has audio" from a <video> element is unreliable across browsers.
     args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2');
   }
-  args.push('-movflags', '+faststart', '-y', outPath);
+  // +faststart is an mp4/mov-muxer-only option. Forcing it on a webm/mkv output
+  // (e.g. Lightning-mode export of a browser recording, which is usually webm)
+  // makes ffmpeg exit with "Unrecognized option 'movflags'".
+  if (/\.(mp4|m4v|mov)$/i.test(outPath)) args.push('-movflags', '+faststart');
+  args.push('-y', outPath);
   return args;
 }
 
