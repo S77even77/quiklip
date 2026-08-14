@@ -16,7 +16,19 @@
 <!-- ══════════════════════════════════ LIBRARY ══════════════════════════════ -->
 <section class="screen" id="screen-library" data-screen="library">
   <header class="topbar">
-    <div class="brand"><span class="dot"></span> quiklip</div>
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <defs>
+          <linearGradient id="qkGrad" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#4f7cff"/>
+            <stop offset="1" stop-color="#6d93ff"/>
+          </linearGradient>
+        </defs>
+        <rect width="32" height="32" rx="9" fill="url(#qkGrad)"/>
+        <path d="M11 7 L11 13 L15.2 16 L11 19 L11 25 L24 16 Z" fill="#0b0d12"/>
+      </svg>
+      <span class="brand-word">qui<b>klip</b></span>
+    </div>
     <button class="icon-btn" id="btn-refresh" aria-label="Refresh library">⟳</button>
   </header>
 
