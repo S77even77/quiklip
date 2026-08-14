@@ -88,12 +88,14 @@ async function main() {
   await page.click('#btn-add-record');
   await page.waitForFunction(() => document.querySelector('.screen:not([hidden])')?.dataset.screen === 'record',
     null, { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelector('#cam-preview')?.videoWidth > 0, null, { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector('#cam-source')?.videoWidth > 0, null, { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector('#cam-canvas')?.width > 0, null, { timeout: 5000 });
   const camDims = await page.evaluate(() => {
-    const v = document.querySelector('#cam-preview');
-    return `${v.videoWidth}x${v.videoHeight}`;
+    const v = document.querySelector('#cam-source');
+    const c = document.querySelector('#cam-canvas');
+    return `source ${v.videoWidth}x${v.videoHeight} -> canvas ${c.width}x${c.height}`;
   });
-  log(`  fake camera feeding preview: ${camDims}`);
+  log(`  fake camera feeding the zoom/draw pipeline: ${camDims}`);
   const camErrorShown = await page.evaluate(() => !document.querySelector('#cam-error').hidden);
   if (camErrorShown) {
     const msg = await page.evaluate(() => document.querySelector('#cam-error-msg').textContent);
@@ -101,21 +103,57 @@ async function main() {
   }
   await shot('02-camera-ready');
 
-  log('\n--- recording ---');
+  log('\n--- pinch-to-zoom (synthetic two-pointer gesture on the real listeners) ---');
+  const zoomBefore = await page.evaluate(() => document.querySelector('#cam-zoom-ind').hidden);
+  log(`  zoom indicator hidden before any pinch: ${zoomBefore}`);
+  await page.evaluate(() => {
+    const el = document.querySelector('#cam-wrap');
+    const fire = (type, id, x, y) => el.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: x, clientY: y, bubbles: true }));
+    fire('pointerdown', 1, 150, 400);
+    fire('pointerdown', 2, 250, 400);
+    // spread the two points apart -> pinch OUT -> zoom in
+    fire('pointermove', 1, 80, 400);
+    fire('pointermove', 2, 320, 400);
+    fire('pointerup', 1, 80, 400);
+    fire('pointerup', 2, 320, 400);
+  });
+  const zoomAfter = await page.evaluate(() => document.querySelector('#cam-zoom-val').textContent);
+  const zoomIndVisible = await page.evaluate(() => !document.querySelector('#cam-zoom-ind').hidden);
+  log(`  after synthetic pinch-out: zoom=${zoomAfter} indicator visible=${zoomIndVisible}`);
+  if (!zoomIndVisible || zoomAfter === '1.0×') throw new Error('pinch gesture did not change zoom');
+  await shot('02b-zoomed');
+
+  log('\n--- recording, with a quick-clip mid-session ---');
   await page.click('#btn-record-toggle');
   await page.waitForFunction(() => !document.querySelector('#cam-timer').hidden, null, { timeout: 5000 });
-  await page.waitForTimeout(3500); // record ~3.5s of synthetic video
-  const timerText = await page.evaluate(() => document.querySelector('#cam-timer-txt').textContent);
-  log(`  timer read: ${timerText}`);
+  await page.waitForFunction(() => !document.querySelector('#btn-quick-clip').hidden, null, { timeout: 5000 });
+  await page.waitForTimeout(2000);
   await shot('03-recording');
 
-  await page.click('#btn-record-toggle'); // stop
+  log('  tapping quick-clip #1 (recording must keep going)');
+  await page.click('#btn-quick-clip');
+  await page.waitForFunction((n) => window.__quiklip.exportsCount() >= n, 1, { timeout: 10000 });
+  const stillOn1 = await page.evaluate(() => document.querySelector('#btn-record-toggle').classList.contains('on'));
+  const timerAfterClip1 = await page.evaluate(() => document.querySelector('#cam-timer-txt').textContent);
+  log(`  clips in session: ${await page.evaluate(() => window.__quiklip.exportsCount())} | still recording: ${stillOn1} | timer: ${timerAfterClip1}`);
+  if (!stillOn1) throw new Error('recording stopped after a quick-clip tap — it should keep going');
+
+  await page.waitForTimeout(1500);
+  log('  tapping quick-clip #2');
+  await page.click('#btn-quick-clip');
+  await page.waitForFunction((n) => window.__quiklip.exportsCount() >= n, 2, { timeout: 10000 });
+  log(`  clips in session: ${await page.evaluate(() => window.__quiklip.exportsCount())}`);
+  await shot('03b-after-two-quickclips');
+
+  await page.waitForTimeout(1200);
+  log('\n--- stopping the session (should open the full review/editor for the tail) ---');
+  await page.click('#btn-record-toggle');
   await page.waitForFunction(() => !document.querySelector('#cam-review').hidden, null, { timeout: 10000 });
   const reviewDur = await page.evaluate(() => document.querySelector('#cam-review-dur').textContent);
   log(`  review shows duration: ${reviewDur}`);
   await shot('04-review');
 
-  log('\n--- using the recording ---');
+  log('\n--- using the final (tail) recording ---');
   await page.click('#btn-use-recording');
   await page.waitForFunction(() => document.querySelector('.screen:not([hidden])')?.dataset.screen === 'clip',
     null, { timeout: 15000 });
@@ -125,10 +163,31 @@ async function main() {
   log(`  landed in Clip with: ${recName} | ${info}`);
   await shot('05-clip-from-recording');
 
-  const camReleased = await page.evaluate(() => !document.querySelector('#cam-preview').srcObject);
+  const camReleased = await page.evaluate(() => !document.querySelector('#cam-source').srcObject);
   log(`  camera released after use: ${camReleased}`);
 
-  log('\n--- marking a clip and exporting it ---');
+  const quickClipCount = await page.evaluate(() => window.__quiklip.exportsCount());
+  log(`  quick-clips sitting in the Clips tab: ${quickClipCount} (expect 2)`);
+  if (quickClipCount !== 2) throw new Error(`expected exactly 2 quick-clips in Clips, got ${quickClipCount}`);
+
+  log('\n--- ffprobing one of the LIVE quick-clip segments (not the reviewed tail) ---');
+  const seg = await page.evaluate(async () => {
+    const e = window.__quiklip.state.exports[0]; // most recent quick-clip
+    const buf = new Uint8Array(await e.blob.arrayBuffer());
+    let s = '';
+    for (let j = 0; j < buf.length; j += 0x8000) s += String.fromCharCode.apply(null, buf.subarray(j, j + 0x8000));
+    return { name: e.name, b64: btoa(s) };
+  });
+  const segDest = join(OUT, seg.name);
+  await writeFile(segDest, Buffer.from(seg.b64, 'base64'));
+  const segProbe = await execFileP('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height,codec_name:format=duration', '-of', 'json', segDest]);
+  const segJson = JSON.parse(segProbe.stdout);
+  const segS = segJson.streams?.[0] || {};
+  log(`  ${seg.name}: ${segS.codec_name} ${segS.width}x${segS.height} ${Number(segJson.format?.duration || 0).toFixed(2)}s — a real, independently playable clip, saved while the camera kept rolling`);
+  if (!segS.width || !(Number(segJson.format?.duration) > 0.3)) throw new Error('live quick-clip segment is not a valid video');
+
+  log('\n--- marking a clip (from the tail recording) and exporting it ---');
   const dur = await page.evaluate(() => window.__quiklip.state.info.duration);
   const clipEnd = Math.max(0.6, dur - 0.3);
   await page.evaluate((end) => {

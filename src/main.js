@@ -232,12 +232,89 @@ document.addEventListener('drop', (e) => {
 // Recording is ephemeral, per-session state — deliberately kept out of S so a
 // half-finished recording never gets treated as app state to persist/restore.
 const CAM = {
-  stream: null, recorder: null, chunks: [], mimeType: '', ext: '.webm',
+  stream: null,            // raw getUserMedia stream (camera + mic hardware)
+  recordStream: null,      // canvas video track (zoomed) + the stream's audio track, combined
+  recorder: null,          // MediaRecorder for the CURRENT segment
+  mimeType: '', ext: '.webm',
+  pendingFinal: false,     // true = the segment about to stop is the whole session ending
+  segIndex: 0,             // count of quick-clips saved this session
   startedAt: 0, pausedAccum: 0, pauseStartedAt: 0, timerId: null,
   facing: 'environment', micMuted: false, blob: null, multiCam: false,
+  zoom: 1, zoomHideT: null,
 };
+const MAX_ZOOM = 4;
 
 const canRecord = () => !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+
+const camSource = $('#cam-source');
+const camCanvas = $('#cam-canvas');
+const camCtx = camCanvas.getContext('2d', { alpha: false });
+
+/* ── zoom: redraw the source video onto the canvas every frame, cropped to
+   both "cover" the preview area and zoom in by CAM.zoom. This is what makes
+   pinch-zoom affect the recorded output, not just the on-screen preview —
+   MediaRecorder records canvas.captureStream(), not the raw camera track. */
+function drawCamFrame() {
+  if (camSource.readyState >= 2 && camSource.videoWidth) {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = Math.round(camCanvas.clientWidth * dpr) || 1;
+    const ch = Math.round(camCanvas.clientHeight * dpr) || 1;
+    if (camCanvas.width !== cw || camCanvas.height !== ch) {
+      camCanvas.width = cw;
+      camCanvas.height = ch;
+    }
+    const sw = camSource.videoWidth;
+    const sh = camSource.videoHeight;
+    const containerAspect = camCanvas.width / camCanvas.height;
+    const sourceAspect = sw / sh;
+    let cropW, cropH;
+    if (sourceAspect > containerAspect) { cropH = sh; cropW = sh * containerAspect; }
+    else { cropW = sw; cropH = sw / containerAspect; }
+    cropW /= CAM.zoom;
+    cropH /= CAM.zoom;
+    const sx = (sw - cropW) / 2;
+    const sy = (sh - cropH) / 2;
+    camCtx.drawImage(camSource, sx, sy, cropW, cropH, 0, 0, camCanvas.width, camCanvas.height);
+  }
+  CAM.drawLoopId = requestAnimationFrame(drawCamFrame);
+}
+function stopDrawLoop() {
+  if (CAM.drawLoopId) cancelAnimationFrame(CAM.drawLoopId);
+  CAM.drawLoopId = null;
+}
+// srcObject reassignment re-fires loadedmetadata, so this restarts the loop
+// cleanly on every camera (re)start, flip, or retake.
+camSource.onloadedmetadata = () => { if (!CAM.drawLoopId) drawCamFrame(); };
+
+function setZoom(z) {
+  CAM.zoom = clamp(z, 1, MAX_ZOOM);
+  $('#cam-zoom-ind').hidden = false;
+  $('#cam-zoom-val').textContent = `${CAM.zoom.toFixed(1)}×`;
+  clearTimeout(CAM.zoomHideT);
+  CAM.zoomHideT = setTimeout(() => { $('#cam-zoom-ind').hidden = true; }, 1200);
+}
+
+// Two-finger pinch on the camera preview. Distance ratio since pinch start,
+// applied to the zoom level at that moment — standard camera-app pinch feel.
+const camWrap = $('#cam-wrap');
+const activeTouches = new Map();
+let pinchBase = null;
+const touchDist = (pts) => Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+camWrap.addEventListener('pointerdown', (e) => {
+  activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (activeTouches.size === 2) pinchBase = { dist: touchDist([...activeTouches.values()]), zoom: CAM.zoom };
+});
+camWrap.addEventListener('pointermove', (e) => {
+  if (!activeTouches.has(e.pointerId)) return;
+  activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (activeTouches.size === 2 && pinchBase) {
+    const dist = touchDist([...activeTouches.values()]);
+    setZoom(pinchBase.zoom * (dist / pinchBase.dist));
+  }
+});
+const endTouch = (e) => { activeTouches.delete(e.pointerId); if (activeTouches.size < 2) pinchBase = null; };
+camWrap.addEventListener('pointerup', endTouch);
+camWrap.addEventListener('pointercancel', endTouch);
 
 /** First mimeType the browser can both record AND that ffmpeg.wasm can decode. */
 function pickRecorderMime() {
@@ -263,6 +340,8 @@ async function startCamera() {
   $('#cam-review').hidden = true;
   $('#cam-controls-live').hidden = false;
   $('#rec-status-sub').textContent = 'Starting camera…';
+  CAM.zoom = 1;
+  $('#cam-zoom-ind').hidden = true;
   stopCameraStream();
 
   // Try progressively looser constraints — a resolution or facingMode the
@@ -283,9 +362,8 @@ async function startCamera() {
   if (!stream) return showCamError(lastErr);
 
   CAM.stream = stream;
-  const v = $('#cam-preview');
-  v.srcObject = stream;
-  v.classList.toggle('mirror', CAM.facing === 'user');
+  camSource.srcObject = stream;
+  camCanvas.classList.toggle('mirror', CAM.facing === 'user');
   if (CAM.micMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
   $('#rec-status-sub').textContent = 'Ready';
 
@@ -315,18 +393,24 @@ function showCamError(err) {
 function stopCameraStream() {
   CAM.stream?.getTracks().forEach((t) => t.stop());
   CAM.stream = null;
-  const v = $('#cam-preview');
-  if (v) v.srcObject = null;
+  camSource.srcObject = null;
 }
 
 /** Full teardown when leaving the record screen by any route (tab, back, etc). */
 function teardownCamera() {
   clearInterval(CAM.timerId);
   if (CAM.recorder && CAM.recorder.state !== 'inactive') {
-    CAM.recorder.onstop = null; // leaving — don't pop the review sheet
+    CAM.recorder.onstop = null; // leaving — don't pop the review sheet or continue segments
     try { CAM.recorder.stop(); } catch {}
   }
+  stopDrawLoop();
   stopCameraStream();
+  // Only stop the CANVAS-derived video track here — its audio track is the
+  // same object as CAM.stream's mic track, already stopped by stopCameraStream().
+  CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
+  CAM.recordStream = null;
+  CAM.zoom = 1;
+  $('#cam-zoom-ind').hidden = true;
   const pv = $('#cam-playback');
   if (pv?.src) URL.revokeObjectURL(pv.src);
   if (pv) { pv.removeAttribute('src'); pv.hidden = true; }
@@ -367,33 +451,73 @@ $('#btn-pause-rec').addEventListener('click', () => {
   }
 });
 
+/**
+ * One segment = one MediaRecorder run. A quick-clip tap stops the current
+ * segment (which finalizes it as a real, independently playable clip — you
+ * can't validly slice a still-running recorder's output any other way) and
+ * immediately starts the next one on the same live stream, so the camera
+ * feed and the on-screen timer never visibly pause.
+ */
+function beginSegment() {
+  const chunks = [];
+  let recorder;
+  try { recorder = new MediaRecorder(CAM.recordStream, { mimeType: CAM.mimeType }); }
+  catch { recorder = new MediaRecorder(CAM.recordStream); } // let the browser pick
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: CAM.mimeType || 'video/webm' });
+    if (CAM.pendingFinal) {
+      clearInterval(CAM.timerId);
+      CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
+      CAM.recordStream = null;
+      stopCameraStream();
+      stopDrawLoop();
+      $('#btn-record-toggle').classList.remove('on');
+      $('#btn-quick-clip').hidden = true;
+      $('#btn-pause-rec').hidden = true;
+      $('#cam-timer').hidden = true;
+      CAM.blob = blob;
+      showReview(blob); // the tail end (or the whole take) still gets the full editor
+    } else {
+      finalizeSegment(blob);
+      beginSegment();
+    }
+  };
+  recorder.start(1000); // 1s timeslice bounds memory on long segments
+  CAM.recorder = recorder;
+}
+
+/** A quick-clip tap: send this segment straight to the Clips tab, ready to use. */
+function finalizeSegment(blob) {
+  if (blob.size < 2000) { toast('Clip too short — not saved'); return; }
+  CAM.segIndex += 1;
+  const stamp = new Date();
+  const name = `clip-${stamp.toISOString().slice(0, 19).replace(/[:T]/g, '-')}-${CAM.segIndex}${CAM.ext}`;
+  const url = URL.createObjectURL(blob);
+  S.exports.unshift({ name, blob, url, bytes: blob.size, duration: null, source: 'recording' });
+  if (S.screen === 'exports') renderExports();
+  toast(`Clip saved to Clips · ${fmtBytes(blob.size)}`, true);
+}
+
 function startRecording() {
   const mime = pickRecorderMime();
   if (!mime) { toast('This browser cannot record video'); return; }
   CAM.mimeType = mime;
   CAM.ext = mime.includes('mp4') ? '.mp4' : '.webm';
-  CAM.chunks = [];
+  CAM.segIndex = 0;
+  CAM.pendingFinal = false;
   CAM.pausedAccum = 0;
 
-  let recorder;
-  try { recorder = new MediaRecorder(CAM.stream, { mimeType: mime }); }
-  catch { recorder = new MediaRecorder(CAM.stream); } // let the browser pick
-  CAM.recorder = recorder;
+  // Record the CANVAS (zoomed output), not the raw camera track, plus the
+  // stream's live mic track (kept as the same object so mic-mute keeps working).
+  const canvasStream = camCanvas.captureStream(30);
+  CAM.recordStream = new MediaStream([...canvasStream.getVideoTracks(), ...CAM.stream.getAudioTracks()]);
 
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size) CAM.chunks.push(e.data); };
-  recorder.onstop = () => {
-    clearInterval(CAM.timerId);
-    const blob = new Blob(CAM.chunks, { type: CAM.mimeType || 'video/webm' });
-    CAM.blob = blob;
-    stopCameraStream();
-    showReview(blob);
-  };
-  // 1s timeslice bounds memory use on long recordings and means a crash loses
-  // at most the last second, not the whole take.
-  recorder.start(1000);
+  beginSegment();
   CAM.startedAt = performance.now();
 
   $('#btn-record-toggle').classList.add('on');
+  $('#btn-quick-clip').hidden = false;
   $('#btn-pause-rec').hidden = false;
   $('#btn-pause-rec').textContent = '❚❚';
   $('#btn-flip-camera').hidden = true;
@@ -402,6 +526,8 @@ function startRecording() {
   $('#rec-status-sub').textContent = 'Recording…';
   buzz(20);
 
+  // Spans the WHOLE session, not just one segment — a quick-clip tap must not
+  // reset the on-screen clock, since the recording itself never stopped.
   CAM.timerId = setInterval(() => {
     const elapsed = (performance.now() - CAM.startedAt - CAM.pausedAccum) / 1000;
     $('#cam-timer-txt').textContent = fmt(Math.max(0, elapsed));
@@ -410,23 +536,39 @@ function startRecording() {
 
 function stopRecording() {
   if (!CAM.recorder || CAM.recorder.state === 'inactive') return;
+  CAM.pendingFinal = true;
   CAM.recorder.stop();
-  $('#btn-record-toggle').classList.remove('on');
-  $('#btn-pause-rec').hidden = true;
-  $('#cam-timer').hidden = true;
   $('#cam-controls-live').hidden = true;
   buzz([15, 40, 15]);
 }
 
+$('#btn-quick-clip').addEventListener('click', () => {
+  if (!CAM.recorder || CAM.recorder.state === 'inactive') return;
+  CAM.recorder.stop(); // pendingFinal is false, so onstop finalizes + continues
+  buzz([12, 40, 12]);
+  const b = $('#btn-quick-clip');
+  b.classList.add('pulse');
+  setTimeout(() => b.classList.remove('pulse'), 260);
+});
+
 function showReview(blob) {
   const url = URL.createObjectURL(blob);
   const pv = $('#cam-playback');
-  pv.src = url;
   pv.hidden = false;
-  pv.onloadedmetadata = () => { $('#cam-review-dur').textContent = fmt(pv.duration); };
-  pv.play().catch(() => {});
-  $('#cam-review').hidden = false;
-  $('#rec-status-sub').textContent = 'Review your recording';
+  pv.src = url;
+  // Wait for real metadata before painting the review sheet, so it never
+  // flashes "Recorded 0:00" for the split second before duration is known.
+  let revealed = false;
+  const reveal = () => {
+    if (revealed) return;
+    revealed = true;
+    $('#cam-review-dur').textContent = fmt(pv.duration || 0);
+    $('#cam-review').hidden = false;
+    $('#rec-status-sub').textContent = 'Review your recording';
+    pv.play().catch(() => {});
+  };
+  pv.onloadedmetadata = reveal;
+  setTimeout(reveal, 1200); // local blob — should be instant; safety net only
 }
 
 $('#btn-retake').addEventListener('click', () => {

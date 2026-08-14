@@ -36,7 +36,7 @@
       <button class="add-card" id="btn-add-file">
         <span class="add-ico">＋</span>
         <span class="add-t">Choose a video</span>
-        <span class="add-s">From your device</span>
+        <span class="add-s">From your library or files</span>
       </button>
       <button class="add-card" id="btn-add-record">
         <span class="add-ico">●</span>
@@ -44,7 +44,7 @@
         <span class="add-s">Camera &amp; mic</span>
       </button>
     </div>
-    <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv" hidden>
+    <input type="file" id="file-input" accept=".mp4,.mov,.m4v,.webm,.mkv" hidden>
 
     <div id="engine-box" class="engine-box" hidden>
       <div class="us-row"><span id="engine-label">Getting the video engine…</span><span id="engine-pct">0%</span></div>
@@ -69,11 +69,16 @@
     <button class="icon-btn" id="btn-flip-camera" aria-label="Switch camera" hidden>⟲</button>
   </header>
 
-  <div class="cam-wrap">
-    <video id="cam-preview" autoplay muted playsinline></video>
+  <div class="cam-wrap" id="cam-wrap">
+    <!-- cam-source decodes the raw camera feed off-screen; cam-canvas is what's
+         actually shown and recorded, redrawn every frame with the zoom crop
+         applied — so pinch-zoom affects both what you see and what you save. -->
+    <video id="cam-source" autoplay muted playsinline></video>
+    <canvas id="cam-canvas"></canvas>
     <video id="cam-playback" playsinline hidden></video>
 
     <div class="cam-timer" id="cam-timer" hidden><span class="rec"></span> <b id="cam-timer-txt">0:00</b></div>
+    <div class="cam-zoom-ind" id="cam-zoom-ind" hidden><b id="cam-zoom-val">1.0×</b></div>
 
     <div class="cam-error" id="cam-error" hidden>
       <div class="cam-error-ico">🎥</div>
@@ -84,7 +89,10 @@
 
   <div class="cam-controls" id="cam-controls-live">
     <button class="cam-side-btn" id="btn-mute-mic" aria-label="Mute microphone">🎙️</button>
-    <button class="record-btn" id="btn-record-toggle" aria-label="Start recording"><span></span></button>
+    <div class="cam-center-group">
+      <button class="record-btn" id="btn-record-toggle" aria-label="Start recording"><span></span></button>
+      <button class="quick-clip-btn" id="btn-quick-clip" aria-label="Save clip, keep recording" hidden>✂</button>
+    </div>
     <button class="cam-side-btn" id="btn-pause-rec" aria-label="Pause recording" hidden>❚❚</button>
   </div>
 
