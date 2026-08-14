@@ -232,7 +232,7 @@ document.addEventListener('drop', (e) => {
 // half-finished recording never gets treated as app state to persist/restore.
 const CAM = {
   stream: null,            // raw getUserMedia stream (camera + mic hardware)
-  recordStream: null,      // canvas video track (zoomed) + the stream's audio track, combined
+  recordStream: null,      // what MediaRecorder actually records — the raw stream
   recorder: null,          // MediaRecorder for the CURRENT segment
   mimeType: '', ext: '.webm',
   pendingFinal: false,     // true = the segment about to stop is the whole session ending
@@ -245,48 +245,26 @@ const MAX_ZOOM = 4;
 
 const canRecord = () => !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
 
-const camSource = $('#cam-source');
-const camCanvas = $('#cam-canvas');
-const camCtx = camCanvas.getContext('2d', { alpha: false });
+const camPreview = $('#cam-preview');
 
-/* ── zoom: redraw the source video onto the canvas every frame, cropped to
-   both "cover" the preview area and zoom in by CAM.zoom. This is what makes
-   pinch-zoom affect the recorded output, not just the on-screen preview —
-   MediaRecorder records canvas.captureStream(), not the raw camera track. */
-function drawCamFrame() {
-  if (camSource.readyState >= 2 && camSource.videoWidth) {
-    const dpr = window.devicePixelRatio || 1;
-    const cw = Math.round(camCanvas.clientWidth * dpr) || 1;
-    const ch = Math.round(camCanvas.clientHeight * dpr) || 1;
-    if (camCanvas.width !== cw || camCanvas.height !== ch) {
-      camCanvas.width = cw;
-      camCanvas.height = ch;
-    }
-    const sw = camSource.videoWidth;
-    const sh = camSource.videoHeight;
-    const containerAspect = camCanvas.width / camCanvas.height;
-    const sourceAspect = sw / sh;
-    let cropW, cropH;
-    if (sourceAspect > containerAspect) { cropH = sh; cropW = sh * containerAspect; }
-    else { cropW = sw; cropH = sw / containerAspect; }
-    cropW /= CAM.zoom;
-    cropH /= CAM.zoom;
-    const sx = (sw - cropW) / 2;
-    const sy = (sh - cropH) / 2;
-    camCtx.drawImage(camSource, sx, sy, cropW, cropH, 0, 0, camCanvas.width, camCanvas.height);
-  }
-  CAM.drawLoopId = requestAnimationFrame(drawCamFrame);
+/**
+ * Zoom is a live CSS transform on the preview video, not baked into the
+ * recorded file. An earlier version composited every frame onto a canvas
+ * (hidden source video -> canvas -> captureStream()) so zoom would carry
+ * into the saved clip, but a hidden/near-zero-size <video> is a well-known
+ * way to get frame decoding throttled or stopped entirely on iOS Safari —
+ * which reads as exactly what got reported: recording turns solid black.
+ * A CSS transform on an already-visible, already-working video element has
+ * none of that risk, at the cost of zoom being preview-only.
+ */
+function applyPreviewTransform() {
+  const mirror = CAM.facing === 'user' ? 'scaleX(-1) ' : '';
+  camPreview.style.transform = `${mirror}scale(${CAM.zoom})`;
 }
-function stopDrawLoop() {
-  if (CAM.drawLoopId) cancelAnimationFrame(CAM.drawLoopId);
-  CAM.drawLoopId = null;
-}
-// srcObject reassignment re-fires loadedmetadata, so this restarts the loop
-// cleanly on every camera (re)start, flip, or retake.
-camSource.onloadedmetadata = () => { if (!CAM.drawLoopId) drawCamFrame(); };
 
 function setZoom(z) {
   CAM.zoom = clamp(z, 1, MAX_ZOOM);
+  applyPreviewTransform();
   $('#cam-zoom-ind').hidden = false;
   $('#cam-zoom-val').textContent = `${CAM.zoom.toFixed(1)}×`;
   clearTimeout(CAM.zoomHideT);
@@ -364,8 +342,12 @@ async function startCamera() {
   if (!stream) return showCamError(lastErr);
 
   CAM.stream = stream;
-  camSource.srcObject = stream;
-  camCanvas.classList.toggle('mirror', CAM.facing === 'user');
+  camPreview.srcObject = stream;
+  // Call play() explicitly rather than relying solely on the autoplay
+  // attribute — more reliable across Safari versions for a JS-assigned
+  // srcObject, especially after the element has already been used once.
+  camPreview.play().catch(() => {});
+  applyPreviewTransform();
   if (CAM.micMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
   $('#rec-status-sub').textContent = 'Ready';
 
@@ -395,7 +377,7 @@ function showCamError(err) {
 function stopCameraStream() {
   CAM.stream?.getTracks().forEach((t) => t.stop());
   CAM.stream = null;
-  camSource.srcObject = null;
+  camPreview.srcObject = null;
 }
 
 /** Full teardown when leaving the record screen by any route (tab, back, etc). */
@@ -457,10 +439,8 @@ $('#btn-pause-rec').addEventListener('click', () => {
 /** Shared cleanup for "recording is fully over" — normal stop AND error paths. */
 function endRecordingUI() {
   clearInterval(CAM.timerId);
-  CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
   CAM.recordStream = null;
   stopCameraStream();
-  stopDrawLoop();
   $('#btn-record-toggle').classList.remove('on');
   $('#btn-quick-clip').hidden = true;
   $('#btn-pause-rec').hidden = true;
@@ -518,21 +498,10 @@ function startRecording() {
   CAM.pendingFinal = false;
   CAM.pausedAccum = 0;
 
-  // Prefer recording the zoomed CANVAS so pinch-zoom affects the saved file,
-  // not just the live preview. Combining a canvas-captured track with a
-  // separately-sourced mic track is the least battle-tested part of this
-  // feature across real devices — if it fails for any reason, fall back to
-  // recording the raw camera stream rather than silently breaking recording
-  // (and with it, quick-clip) entirely. In the fallback, zoom stays preview-only.
-  try {
-    const canvasStream = camCanvas.captureStream(30);
-    const videoTrack = canvasStream.getVideoTracks()[0];
-    if (!videoTrack) throw new Error('canvas produced no video track');
-    CAM.recordStream = new MediaStream([videoTrack, ...CAM.stream.getAudioTracks()]);
-  } catch (e) {
-    console.warn('[quiklip] canvas recording unavailable, using raw camera instead:', e);
-    CAM.recordStream = CAM.stream;
-  }
+  // Record the raw camera stream directly — the proven-reliable path. Zoom is
+  // a preview-only CSS transform (see applyPreviewTransform), so it never has
+  // to touch what actually gets encoded.
+  CAM.recordStream = CAM.stream;
 
   try {
     beginSegment();

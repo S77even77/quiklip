@@ -75,11 +75,7 @@
   </header>
 
   <div class="cam-wrap" id="cam-wrap">
-    <!-- cam-source decodes the raw camera feed off-screen; cam-canvas is what's
-         actually shown and recorded, redrawn every frame with the zoom crop
-         applied — so pinch-zoom affects both what you see and what you save. -->
-    <video id="cam-source" autoplay muted playsinline></video>
-    <canvas id="cam-canvas"></canvas>
+    <video id="cam-preview" autoplay muted playsinline></video>
     <video id="cam-playback" playsinline hidden></video>
 
     <div class="cam-timer" id="cam-timer" hidden><span class="rec"></span> <b id="cam-timer-txt">0:00</b></div>

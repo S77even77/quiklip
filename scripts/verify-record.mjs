@@ -33,6 +33,35 @@ const MIME = {
 };
 const log = (s) => console.log(s);
 
+/**
+ * Guard against exactly the class of bug that shipped once already: a
+ * recording that's a perfectly valid, correctly-sized, correct-duration
+ * video file whose frames are all solid black (e.g. because a hidden video
+ * element feeding a canvas got its decoding throttled by the browser).
+ * ffprobe's normal checks (codec/dimensions/duration) don't catch this at
+ * all — you need to actually look at pixel content.
+ *
+ * Decodes one frame to raw RGB and averages a sample of the bytes directly —
+ * deliberately not using ffmpeg's signalstats/YAVG (its frame indexing via
+ * the lavfi movie source didn't line up with presentation-order frames when
+ * checked by hand against actual extracted PNGs, and chasing that further
+ * wasn't worth it when reading raw bytes is simple and easy to trust).
+ */
+async function assertNotBlack(filePath, label) {
+  const stdout = await new Promise((resolve, reject) => {
+    execFile('ffmpeg', ['-v', 'error', '-i', filePath, '-vf', 'select=gte(n\\,2)',
+      '-vframes', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
+      { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+      (err, out) => (err ? reject(err) : resolve(out)));
+  });
+  if (!stdout || !stdout.length) throw new Error(`${label}: could not decode any frame data`);
+  let sum = 0, n = 0;
+  for (let i = 0; i < stdout.length; i += 37) { sum += stdout[i]; n++; } // odd stride mixes R/G/B fairly
+  const avg = sum / n;
+  log(`  ${label}: sampled pixel avg=${avg.toFixed(1)}/255 (0=black)`);
+  if (avg < 8) throw new Error(`${label}: frame is essentially solid black (avg=${avg.toFixed(1)}) — this is the exact bug that shipped once`);
+}
+
 function serve() {
   return new Promise((resolve) => {
     const srv = createServer(async (req, res) => {
@@ -90,14 +119,12 @@ async function main() {
   await page.click('#opt-record');
   await page.waitForFunction(() => document.querySelector('.screen:not([hidden])')?.dataset.screen === 'record',
     null, { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelector('#cam-source')?.videoWidth > 0, null, { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelector('#cam-canvas')?.width > 0, null, { timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector('#cam-preview')?.videoWidth > 0, null, { timeout: 15000 });
   const camDims = await page.evaluate(() => {
-    const v = document.querySelector('#cam-source');
-    const c = document.querySelector('#cam-canvas');
-    return `source ${v.videoWidth}x${v.videoHeight} -> canvas ${c.width}x${c.height}`;
+    const v = document.querySelector('#cam-preview');
+    return `${v.videoWidth}x${v.videoHeight}, paused=${v.paused}`;
   });
-  log(`  fake camera feeding the zoom/draw pipeline: ${camDims}`);
+  log(`  fake camera feeding the preview: ${camDims}`);
   const camErrorShown = await page.evaluate(() => !document.querySelector('#cam-error').hidden);
   if (camErrorShown) {
     const msg = await page.evaluate(() => document.querySelector('#cam-error-msg').textContent);
@@ -165,7 +192,7 @@ async function main() {
   log(`  landed in Clip with: ${recName} | ${info}`);
   await shot('05-clip-from-recording');
 
-  const camReleased = await page.evaluate(() => !document.querySelector('#cam-source').srcObject);
+  const camReleased = await page.evaluate(() => !document.querySelector('#cam-preview').srcObject);
   log(`  camera released after use: ${camReleased}`);
 
   const quickClipCount = await page.evaluate(() => window.__quiklip.exportsCount());
@@ -188,6 +215,7 @@ async function main() {
   const segS = segJson.streams?.[0] || {};
   log(`  ${seg.name}: ${segS.codec_name} ${segS.width}x${segS.height} ${Number(segJson.format?.duration || 0).toFixed(2)}s — a real, independently playable clip, saved while the camera kept rolling`);
   if (!segS.width || !(Number(segJson.format?.duration) > 0.3)) throw new Error('live quick-clip segment is not a valid video');
+  await assertNotBlack(segDest, 'quick-clip segment');
 
   log('\n--- marking a clip (from the tail recording) and exporting it ---');
   const dur = await page.evaluate(() => window.__quiklip.state.info.duration);
@@ -223,6 +251,7 @@ async function main() {
   const outDur = Number(probe.format?.duration || 0);
   log(`  ${name}: ${s.codec_name} ${s.width}x${s.height} ${outDur.toFixed(2)}s`);
   const ok = s.codec_name === 'h264' && s.width > 0 && s.height > 0 && outDur > 0.3;
+  await assertNotBlack(dest, 'exported clip from the tail recording');
 
   log('\n--- also proving Lightning (stream-copy) mode survives a webm recording ---');
   // This is the exact path the earlier movflags bug broke: copy-mode export
@@ -241,43 +270,6 @@ async function main() {
     } catch (e) { return { ok: false, err: String(e.message || e) }; }
   });
   log(`  copy-mode on recorded source: ${JSON.stringify(copyResult)}`);
-
-  log('\n--- simulating a device where canvas+mic recording is unsupported ---');
-  // This is the actual failure mode being defended against: on some real
-  // devices, combining a canvas-captured video track with a separate mic
-  // audio track for MediaRecorder can fail. Force that failure here and
-  // confirm startRecording() falls back instead of silently doing nothing —
-  // which is what "the quick-clip button never appears" looks like from the
-  // outside when the whole function aborts partway through.
-  await page.click('#tabbar button[data-go="library"]');
-  await page.waitForTimeout(300);
-  await page.evaluate(() => {
-    HTMLCanvasElement.prototype.captureStream = function () {
-      throw new Error('SIMULATED: captureStream unsupported on this device');
-    };
-  });
-  await page.click('#btn-add-open');
-  await page.waitForFunction(() => !document.querySelector('#sheet-add').hidden, null, { timeout: 5000 });
-  await page.click('#opt-record');
-  await page.waitForFunction(() => document.querySelector('#cam-source')?.videoWidth > 0, null, { timeout: 15000 });
-  const fallbackWarn = [];
-  page.on('console', (m) => { if (/canvas recording unavailable/.test(m.text())) fallbackWarn.push(m.text()); });
-
-  await page.click('#btn-record-toggle');
-  const quickClipShown = await page.waitForFunction(() => !document.querySelector('#btn-quick-clip').hidden, null, { timeout: 5000 })
-    .then(() => true).catch(() => false);
-  log(`  quick-clip button appeared despite forced captureStream failure: ${quickClipShown}`);
-  if (!quickClipShown) throw new Error('FALLBACK BROKEN — recording silently failed to start, exactly the reported bug');
-
-  const beforeFallbackCount = await page.evaluate(() => window.__quiklip.exportsCount());
-  await page.waitForTimeout(1500);
-  await page.click('#btn-quick-clip');
-  await page.waitForFunction((n) => window.__quiklip.exportsCount() > n, beforeFallbackCount, { timeout: 10000 });
-  log(`  quick-clip worked in fallback mode too — clips now: ${await page.evaluate(() => window.__quiklip.exportsCount())}`);
-  await shot('07-fallback-mode-works');
-  await page.click('#btn-record-toggle'); // stop, back to idle
-  await page.waitForFunction(() => !document.querySelector('#cam-review').hidden, null, { timeout: 10000 });
-  log(`  fallback console warning seen: ${fallbackWarn.length > 0}`);
 
   log('\n--- console errors ---');
   log(errors.length ? errors.slice(0, 12).join('\n') : '  (none)');
