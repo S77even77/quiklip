@@ -32,18 +32,11 @@
       here in the browser. There is no server, no account, and no file ever leaves your phone.</div>
     </div>
 
-    <div class="add-row">
-      <button class="add-card" id="btn-add-file">
-        <span class="add-ico">＋</span>
-        <span class="add-t">Choose a video</span>
-        <span class="add-s">From your library or files</span>
-      </button>
-      <button class="add-card" id="btn-add-record">
-        <span class="add-ico">●</span>
-        <span class="add-t">Record video</span>
-        <span class="add-s">Camera &amp; mic</span>
-      </button>
-    </div>
+    <button class="add-card wide" id="btn-add-open">
+      <span class="add-ico">＋</span>
+      <span class="add-t">Add a video</span>
+      <span class="add-s">Record or choose from your device</span>
+    </button>
     <input type="file" id="file-input" accept=".mp4,.mov,.m4v,.webm,.mkv" hidden>
 
     <div id="engine-box" class="engine-box" hidden>
@@ -259,6 +252,19 @@
 
 <!-- ═════════════════════════════════ SHEETS ════════════════════════════════ -->
 <div class="sheet-scrim" id="scrim" hidden></div>
+
+<div class="sheet" id="sheet-add" hidden>
+  <div class="sh-grab"></div>
+  <h2>Add a video</h2>
+  <button class="sheet-option" id="opt-record">
+    <span class="so-ico">●</span>
+    <span class="so-t"><b>Record video</b><em>Camera &amp; mic, right here in the app</em></span>
+  </button>
+  <button class="sheet-option" id="opt-choose">
+    <span class="so-ico">📁</span>
+    <span class="so-t"><b>Choose a video</b><em>From your library or files</em></span>
+  </button>
+</div>
 
 <div class="sheet" id="sheet-settings" hidden>
   <div class="sh-grab"></div>

@@ -76,6 +76,9 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ca
   padding:16px 12px;display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left;
 }
 .add-card:active{background:var(--card2);transform:scale(.985)}
+.add-card.wide{width:100%;padding:18px 16px}
+.add-card.wide .add-ico{font-size:24px}
+.add-card.wide .add-t{font-size:15.5px}
 .add-ico{font-size:22px;color:var(--acc2);line-height:1;margin-bottom:6px}
 .add-t{font-weight:650;font-size:14.5px}
 .add-s{font-size:11.5px;color:var(--dim)}
@@ -300,6 +303,16 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ca
 .sh-grab{width:38px;height:4px;background:var(--line);border-radius:99px;margin:0 auto 14px}
 .sheet h2{margin:0 0 14px;font-size:19px;letter-spacing:-.3px}
 .sh-p{color:var(--dim);font-size:13px;margin:0 0 14px}
+
+.sheet-option{
+  display:flex;align-items:center;gap:14px;width:100%;
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:14px 16px;margin-bottom:10px;text-align:left;
+}
+.sheet-option:active{background:var(--card2)}
+.so-ico{font-size:21px;flex:none;width:28px;text-align:center}
+.so-t b{display:block;font-size:14.5px;font-weight:650;margin-bottom:2px}
+.so-t em{font-style:normal;font-size:12px;color:var(--dim)}
 .sheet input[type=text],.sheet input[type=url]{
   width:100%;background:var(--card);border:1px solid var(--line);border-radius:13px;
   padding:14px;font-size:16px;margin-bottom:14px;

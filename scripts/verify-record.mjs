@@ -84,8 +84,10 @@ async function main() {
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'load' });
   await shot('01-library');
 
-  log('\n--- opening the record screen ---');
-  await page.click('#btn-add-record');
+  log('\n--- opening the record screen (via the merged Add-a-video sheet) ---');
+  await page.click('#btn-add-open');
+  await page.waitForFunction(() => !document.querySelector('#sheet-add').hidden, null, { timeout: 5000 });
+  await page.click('#opt-record');
   await page.waitForFunction(() => document.querySelector('.screen:not([hidden])')?.dataset.screen === 'record',
     null, { timeout: 15000 });
   await page.waitForFunction(() => document.querySelector('#cam-source')?.videoWidth > 0, null, { timeout: 15000 });
@@ -239,6 +241,43 @@ async function main() {
     } catch (e) { return { ok: false, err: String(e.message || e) }; }
   });
   log(`  copy-mode on recorded source: ${JSON.stringify(copyResult)}`);
+
+  log('\n--- simulating a device where canvas+mic recording is unsupported ---');
+  // This is the actual failure mode being defended against: on some real
+  // devices, combining a canvas-captured video track with a separate mic
+  // audio track for MediaRecorder can fail. Force that failure here and
+  // confirm startRecording() falls back instead of silently doing nothing —
+  // which is what "the quick-clip button never appears" looks like from the
+  // outside when the whole function aborts partway through.
+  await page.click('#tabbar button[data-go="library"]');
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    HTMLCanvasElement.prototype.captureStream = function () {
+      throw new Error('SIMULATED: captureStream unsupported on this device');
+    };
+  });
+  await page.click('#btn-add-open');
+  await page.waitForFunction(() => !document.querySelector('#sheet-add').hidden, null, { timeout: 5000 });
+  await page.click('#opt-record');
+  await page.waitForFunction(() => document.querySelector('#cam-source')?.videoWidth > 0, null, { timeout: 15000 });
+  const fallbackWarn = [];
+  page.on('console', (m) => { if (/canvas recording unavailable/.test(m.text())) fallbackWarn.push(m.text()); });
+
+  await page.click('#btn-record-toggle');
+  const quickClipShown = await page.waitForFunction(() => !document.querySelector('#btn-quick-clip').hidden, null, { timeout: 5000 })
+    .then(() => true).catch(() => false);
+  log(`  quick-clip button appeared despite forced captureStream failure: ${quickClipShown}`);
+  if (!quickClipShown) throw new Error('FALLBACK BROKEN — recording silently failed to start, exactly the reported bug');
+
+  const beforeFallbackCount = await page.evaluate(() => window.__quiklip.exportsCount());
+  await page.waitForTimeout(1500);
+  await page.click('#btn-quick-clip');
+  await page.waitForFunction((n) => window.__quiklip.exportsCount() > n, beforeFallbackCount, { timeout: 10000 });
+  log(`  quick-clip worked in fallback mode too — clips now: ${await page.evaluate(() => window.__quiklip.exportsCount())}`);
+  await shot('07-fallback-mode-works');
+  await page.click('#btn-record-toggle'); // stop, back to idle
+  await page.waitForFunction(() => !document.querySelector('#cam-review').hidden, null, { timeout: 10000 });
+  log(`  fallback console warning seen: ${fallbackWarn.length > 0}`);
 
   log('\n--- console errors ---');
   log(errors.length ? errors.slice(0, 12).join('\n') : '  (none)');

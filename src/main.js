@@ -149,7 +149,7 @@ async function loadLibrary() {
     S.lib = rows;
     $('#lib-count').textContent = rows.length ? `(${rows.length})` : '';
     if (!rows.length) {
-      box.innerHTML = `<p class="empty">Nothing here yet. Tap <b>Choose a video</b> above to get started.</p>`;
+      box.innerHTML = `<p class="empty">Nothing here yet. Tap <b>Add a video</b> above to get started.</p>`;
       return;
     }
     box.innerHTML = '';
@@ -188,7 +188,6 @@ async function loadLibrary() {
 $('#btn-refresh').addEventListener('click', loadLibrary);
 
 /* ── adding a file ── */
-$('#btn-add-file').addEventListener('click', () => $('#file-input').click());
 $('#file-input').addEventListener('change', async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -328,7 +327,10 @@ function pickRecorderMime() {
   return candidates.find((m) => window.MediaRecorder?.isTypeSupported?.(m)) || '';
 }
 
-$('#btn-add-record').addEventListener('click', () => {
+$('#btn-add-open').addEventListener('click', () => openSheet('#sheet-add'));
+$('#opt-choose').addEventListener('click', () => { closeSheets(); $('#file-input').click(); });
+$('#opt-record').addEventListener('click', () => {
+  closeSheets();
   if (!canRecord()) return toast('Camera recording needs a supported browser (Chrome, Safari 16.4+) over HTTPS');
   go('record');
   startCamera();
@@ -398,17 +400,11 @@ function stopCameraStream() {
 
 /** Full teardown when leaving the record screen by any route (tab, back, etc). */
 function teardownCamera() {
-  clearInterval(CAM.timerId);
   if (CAM.recorder && CAM.recorder.state !== 'inactive') {
     CAM.recorder.onstop = null; // leaving — don't pop the review sheet or continue segments
     try { CAM.recorder.stop(); } catch {}
   }
-  stopDrawLoop();
-  stopCameraStream();
-  // Only stop the CANVAS-derived video track here — its audio track is the
-  // same object as CAM.stream's mic track, already stopped by stopCameraStream().
-  CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
-  CAM.recordStream = null;
+  endRecordingUI();
   CAM.zoom = 1;
   $('#cam-zoom-ind').hidden = true;
   const pv = $('#cam-playback');
@@ -458,6 +454,19 @@ $('#btn-pause-rec').addEventListener('click', () => {
  * immediately starts the next one on the same live stream, so the camera
  * feed and the on-screen timer never visibly pause.
  */
+/** Shared cleanup for "recording is fully over" — normal stop AND error paths. */
+function endRecordingUI() {
+  clearInterval(CAM.timerId);
+  CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
+  CAM.recordStream = null;
+  stopCameraStream();
+  stopDrawLoop();
+  $('#btn-record-toggle').classList.remove('on');
+  $('#btn-quick-clip').hidden = true;
+  $('#btn-pause-rec').hidden = true;
+  $('#cam-timer').hidden = true;
+}
+
 function beginSegment() {
   const chunks = [];
   let recorder;
@@ -467,20 +476,21 @@ function beginSegment() {
   recorder.onstop = () => {
     const blob = new Blob(chunks, { type: CAM.mimeType || 'video/webm' });
     if (CAM.pendingFinal) {
-      clearInterval(CAM.timerId);
-      CAM.recordStream?.getVideoTracks().forEach((t) => t.stop());
-      CAM.recordStream = null;
-      stopCameraStream();
-      stopDrawLoop();
-      $('#btn-record-toggle').classList.remove('on');
-      $('#btn-quick-clip').hidden = true;
-      $('#btn-pause-rec').hidden = true;
-      $('#cam-timer').hidden = true;
+      endRecordingUI();
       CAM.blob = blob;
       showReview(blob); // the tail end (or the whole take) still gets the full editor
     } else {
       finalizeSegment(blob);
-      beginSegment();
+      // Starting the next segment can itself fail on a flaky device — if it
+      // does, the clips already saved are NOT lost; just end the session
+      // cleanly instead of leaving the UI stuck mid-recording.
+      try { beginSegment(); }
+      catch (e) {
+        console.warn('[quiklip] could not continue recording after quick-clip:', e);
+        toast('Recording stopped — your clips are saved');
+        endRecordingUI();
+        $('#rec-status-sub').textContent = 'Ready';
+      }
     }
   };
   recorder.start(1000); // 1s timeslice bounds memory on long segments
@@ -508,12 +518,29 @@ function startRecording() {
   CAM.pendingFinal = false;
   CAM.pausedAccum = 0;
 
-  // Record the CANVAS (zoomed output), not the raw camera track, plus the
-  // stream's live mic track (kept as the same object so mic-mute keeps working).
-  const canvasStream = camCanvas.captureStream(30);
-  CAM.recordStream = new MediaStream([...canvasStream.getVideoTracks(), ...CAM.stream.getAudioTracks()]);
+  // Prefer recording the zoomed CANVAS so pinch-zoom affects the saved file,
+  // not just the live preview. Combining a canvas-captured track with a
+  // separately-sourced mic track is the least battle-tested part of this
+  // feature across real devices — if it fails for any reason, fall back to
+  // recording the raw camera stream rather than silently breaking recording
+  // (and with it, quick-clip) entirely. In the fallback, zoom stays preview-only.
+  try {
+    const canvasStream = camCanvas.captureStream(30);
+    const videoTrack = canvasStream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error('canvas produced no video track');
+    CAM.recordStream = new MediaStream([videoTrack, ...CAM.stream.getAudioTracks()]);
+  } catch (e) {
+    console.warn('[quiklip] canvas recording unavailable, using raw camera instead:', e);
+    CAM.recordStream = CAM.stream;
+  }
 
-  beginSegment();
+  try {
+    beginSegment();
+  } catch (e) {
+    toast(`Could not start recording: ${e.message || e}`);
+    CAM.recordStream = null;
+    return;
+  }
   CAM.startedAt = performance.now();
 
   $('#btn-record-toggle').classList.add('on');
@@ -1217,7 +1244,7 @@ setArmedUI(false);
 refreshSettings();
 loadLibrary();
 compatNote();
-if (!canRecord()) $('#btn-add-record').hidden = true;
+if (!canRecord()) $('#opt-record').hidden = true;
 
 // Test seam for scripts/verify.mjs — lets the harness set exact in/out points
 // (bypassing the reaction offset) so exports can be checked against known times.
