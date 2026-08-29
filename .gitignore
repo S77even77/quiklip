@@ -16,3 +16,4 @@ projects/
 .DS_Store
 *.log
 .vercel
+.aider*
