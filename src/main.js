@@ -240,6 +240,7 @@ const CAM = {
   startedAt: 0, pausedAccum: 0, pauseStartedAt: 0, timerId: null,
   facing: 'environment', micMuted: false, blob: null, multiCam: false,
   zoom: 1, zoomHideT: null,
+  session: null,           // identity token — stale startCamera() continuations bail
 };
 const MAX_ZOOM = 4;
 
@@ -315,7 +316,7 @@ $('#opt-record').addEventListener('click', () => {
 });
 $('#btn-cam-retry').addEventListener('click', startCamera);
 
-async function startCamera() {
+async function startCamera(attempt = 0) {
   $('#cam-error').hidden = true;
   $('#cam-review').hidden = true;
   $('#cam-controls-live').hidden = false;
@@ -323,6 +324,7 @@ async function startCamera() {
   CAM.zoom = 1;
   $('#cam-zoom-ind').hidden = true;
   stopCameraStream();
+  const session = (CAM.session = {}); // stale async continuations bail out below
 
   // Try progressively looser constraints — a resolution or facingMode the
   // device can't honor should degrade gracefully, not dead-end the feature.
@@ -339,6 +341,7 @@ async function startCamera() {
     try { stream = await navigator.mediaDevices.getUserMedia(constraints); break; }
     catch (e) { lastErr = e; }
   }
+  if (CAM.session !== session) { stream?.getTracks().forEach((t) => t.stop()); return; }
   if (!stream) return showCamError(lastErr);
 
   CAM.stream = stream;
@@ -349,14 +352,88 @@ async function startCamera() {
   camPreview.play().catch(() => {});
   applyPreviewTransform();
   if (CAM.micMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
+  watchStreamHealth(stream);
+
+  // iOS Safari can hand back a stream that LOOKS fine (live tracks, real
+  // settings) but never delivers a single frame — the preview just sits
+  // black with no error anywhere. Don't trust the stream until a frame has
+  // actually been painted; if none arrives, re-acquire once, then surface a
+  // real error instead of a silent black rectangle.
+  const gotFrames = await waitForFrames(camPreview, 2500);
+  if (CAM.session !== session) return;
+  if (!gotFrames) {
+    console.warn(`[quiklip] camera stream delivered no frames (attempt ${attempt + 1})`);
+    if (attempt === 0) return startCamera(1);
+    return showCamError({ name: 'NoFramesError' });
+  }
   $('#rec-status-sub').textContent = 'Ready';
 
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     CAM.multiCam = devices.filter((d) => d.kind === 'videoinput').length > 1;
   } catch { CAM.multiCam = false; }
+  if (CAM.session !== session) return;
   $('#btn-flip-camera').hidden = !CAM.multiCam;
 }
+
+/** Resolves true once the video element has painted a real frame, false on timeout. */
+function waitForFrames(video, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+      video.requestVideoFrameCallback(() => finish(true));
+    } else {
+      const poll = () => {
+        if (done) return;
+        if (video.videoWidth > 0 && video.currentTime > 0) return finish(true);
+        requestAnimationFrame(poll);
+      };
+      poll();
+    }
+    setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+/**
+ * iOS interrupts live camera tracks constantly — phone call or Siri mutes
+ * them, backgrounding Safari or the OS reclaiming the camera ends them —
+ * and without handlers every one of those reads as "the preview went black".
+ */
+function watchStreamHealth(stream) {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  const isRecording = () => CAM.recorder && CAM.recorder.state !== 'inactive';
+  track.onmute = () => {
+    if (S.screen === 'record' && CAM.stream === stream)
+      $('#rec-status-sub').textContent = 'Camera paused by the system…';
+  };
+  track.onunmute = () => {
+    if (S.screen === 'record' && CAM.stream === stream)
+      $('#rec-status-sub').textContent = isRecording() ? 'Recording…' : 'Ready';
+  };
+  track.onended = () => {
+    if (S.screen !== 'record' || CAM.stream !== stream) return;
+    if (isRecording()) stopRecording(); // salvage what's recorded so far
+    else startCamera();                 // OS took the camera — just re-acquire
+  };
+}
+
+// Returning to the app after iOS killed or muted the camera in the background
+// otherwise leaves a permanently black preview until a manual retry.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || S.screen !== 'record') return;
+  if (!$('#cam-review').hidden || !$('#cam-error').hidden) return;
+  if (CAM.recorder && CAM.recorder.state !== 'inactive') return;
+  const track = CAM.stream?.getVideoTracks()[0];
+  if (!track || track.readyState === 'ended') { startCamera(); return; }
+  if (track.muted) setTimeout(() => { // give iOS a beat to unmute on its own
+    if (document.visibilityState !== 'visible' || S.screen !== 'record') return;
+    const t = CAM.stream?.getVideoTracks()[0];
+    if ((!t || t.muted || t.readyState === 'ended') &&
+        (!CAM.recorder || CAM.recorder.state === 'inactive')) startCamera();
+  }, 2000);
+});
 
 function showCamError(err) {
   const map = {
@@ -367,21 +444,27 @@ function showCamError(err) {
     NotReadableError: 'Your camera is already in use by another app.',
     TrackStartError: 'Your camera is already in use by another app.',
     OverconstrainedError: 'This camera does not support the requested settings.',
+    NoFramesError: 'The camera connected but never sent any video. Close other apps using the camera, then try again — if it persists, close this tab and reopen it.',
   };
-  $('#cam-error-msg').textContent = map[err?.name] || err?.message || 'Could not access the camera.';
+  const detail = err?.name && !map[err.name] ? ` (${err.name})` : '';
+  $('#cam-error-msg').textContent = (map[err?.name] || err?.message || 'Could not access the camera.') + detail;
   $('#cam-error').hidden = false;
   $('#cam-controls-live').hidden = true;
   $('#rec-status-sub').textContent = 'Camera unavailable';
 }
 
 function stopCameraStream() {
-  CAM.stream?.getTracks().forEach((t) => t.stop());
+  CAM.stream?.getTracks().forEach((t) => {
+    t.onmute = t.onunmute = t.onended = null; // deliberate stop, not an iOS interruption
+    t.stop();
+  });
   CAM.stream = null;
   camPreview.srcObject = null;
 }
 
 /** Full teardown when leaving the record screen by any route (tab, back, etc). */
 function teardownCamera() {
+  CAM.session = null; // invalidate any in-flight startCamera continuation
   if (CAM.recorder && CAM.recorder.state !== 'inactive') {
     CAM.recorder.onstop = null; // leaving — don't pop the review sheet or continue segments
     try { CAM.recorder.stop(); } catch {}
